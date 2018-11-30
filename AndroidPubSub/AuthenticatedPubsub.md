@@ -95,3 +95,396 @@ The sample demonstrates how to use IOT with certificate based authentication. Th
                         }
                     });
     ```
+
+Finally, your MainActivity.java and PubSubActivity.java should look like the following:
+
+```
+package com.amazonaws.demo.androidpubsub;
+
+import android.support.v7.app.AppCompatActivity;
+import android.os.Bundle;
+import android.util.Log;
+
+import com.amazonaws.mobile.client.AWSMobileClient;
+import com.amazonaws.mobile.client.Callback;
+import com.amazonaws.mobile.client.SignInUIOptions;
+import com.amazonaws.mobile.client.UserStateDetails;
+
+import java.util.concurrent.CountDownLatch;
+
+public class Main2Activity extends AppCompatActivity {
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main2);
+        final CountDownLatch latch = new CountDownLatch(1);
+        AWSMobileClient.getInstance().initialize(getApplicationContext(), new Callback<UserStateDetails>() {
+            @Override
+            public void onResult(UserStateDetails userStateDetails) {
+                latch.countDown();
+            }
+
+            @Override
+            public void onError(Exception e) {
+                Log.e("INIT", e.toString());
+                latch.countDown();
+            }
+        });
+
+        try {
+            latch.await();
+            AWSMobileClient.getInstance().showSignIn(
+                    Main2Activity.this,
+                    SignInUIOptions.builder()
+                            .nextActivity(PubSubActivity.class)
+                            .build(),
+                    new Callback<UserStateDetails>() {
+                        @Override
+                        public void onResult(UserStateDetails result) {
+                            Log.d("Main2Activity", "onResult: " + result.getUserState());
+                            switch (result.getUserState()){
+                                case SIGNED_IN:
+                                    Log.i("Main2Activity", "logged in!");
+                                    break;
+                                case SIGNED_OUT:
+                                    Log.i("Main2Activity", "onResult: User did not choose to sign-in");
+                                    break;
+                                default:
+                                    AWSMobileClient.getInstance().signOut();
+                                    break;
+                            }
+                        }
+
+                        @Override
+                        public void onError(Exception e) {
+                            Log.e("Main2Activity", "onError: ", e);
+                        }
+                    }
+            );
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+    }
+
+}
+```
+```
+/**
+ * Copyright 2010-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at:
+ *
+ *    http://aws.amazon.com/apache2.0
+ *
+ * This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES
+ * OR CONDITIONS OF ANY KIND, either express or implied. See the
+ * License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.amazonaws.demo.androidpubsub;
+
+import android.app.Activity;
+import android.content.Intent;
+import android.os.Bundle;
+import android.util.Log;
+import android.view.View;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import com.amazonaws.auth.CognitoCachingCredentialsProvider;
+import com.amazonaws.mobile.client.AWSMobileClient;
+import com.amazonaws.mobileconnectors.iot.AWSIotMqttClientStatusCallback;
+import com.amazonaws.mobileconnectors.iot.AWSIotMqttLastWillAndTestament;
+import com.amazonaws.mobileconnectors.iot.AWSIotMqttManager;
+import com.amazonaws.mobileconnectors.iot.AWSIotMqttNewMessageCallback;
+import com.amazonaws.mobileconnectors.iot.AWSIotMqttQos;
+import com.amazonaws.regions.Region;
+import com.amazonaws.regions.Regions;
+import com.amazonaws.services.cognitoidentity.AmazonCognitoIdentity;
+import com.amazonaws.services.cognitoidentity.AmazonCognitoIdentityClient;
+import com.amazonaws.services.cognitoidentity.model.GetIdRequest;
+import com.amazonaws.services.cognitoidentity.model.GetIdResult;
+import com.amazonaws.services.iot.AWSIotClient;
+import com.amazonaws.services.iot.model.AttachPrincipalPolicyRequest;
+
+import java.io.UnsupportedEncodingException;
+import java.security.KeyStore;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+
+public class PubSubActivity extends Activity {
+
+    static final String LOG_TAG = PubSubActivity.class.getCanonicalName();
+
+    // --- Constants to modify per your configuration ---
+
+    // IoT endpoint
+    // AWS Iot CLI describe-endpoint call returns: XXXXXXXXXX.iot.<region>.amazonaws.com
+    private static final String CUSTOMER_SPECIFIC_ENDPOINT = "XXXXXXXXXX-ats.iot.us-east-1.amazonaws.com";
+    // Cognito pool ID. For this app, pool needs to be unauthenticated pool with
+    // AWS IoT permissions.
+    private static final String COGNITO_POOL_ID = "us-east-1:XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXX";
+    // Name of the AWS IoT policy to attach to a newly created certificate
+    private static final String AWS_IOT_POLICY_NAME = "AndroidPubSubPolicy";
+
+    // Region of AWS IoT
+    private static final Regions MY_REGION = Regions.US_EAST_1;
+
+    EditText txtSubcribe;
+    EditText txtTopic;
+    EditText txtMessage;
+
+    TextView tvLastMessage;
+    TextView tvClientId;
+    TextView tvStatus;
+
+    Button btnConnect;
+    Button signOutButton;
+    Button btnSubscribe;
+    Button btnPublish;
+    Button btnDisconnect;
+
+
+    AWSIotClient mIotAndroidClient;
+    AWSIotMqttManager mqttManager;
+    String clientId;
+    String keystorePath;
+    String keystoreName;
+    String keystorePassword;
+
+    KeyStore clientKeyStore = null;
+    String certificateId;
+    String token;
+
+    CognitoCachingCredentialsProvider credentialsProvider;
+    AmazonCognitoIdentity cognitoIdentity;
+    GetIdRequest getIdReq;
+    GetIdResult getIdRes;
+    AttachPrincipalPolicyRequest attachPolicyReq;
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+
+        Intent intent = getIntent();
+        if(null == intent){
+            Toast.makeText(getApplicationContext(), "Token is null", Toast.LENGTH_SHORT).show();
+        }else {
+            token = intent.getStringExtra("token");
+        }
+
+        Map<String, String> logins = new HashMap<String, String>();
+        //fill it with Cognito User token
+        System.out.println("TOKEN : " + token);
+        logins.put("cognito-idp.us-east-1.amazonaws.com/us-east-1_zLC4QliiG", token);
+
+        txtSubcribe = (EditText) findViewById(R.id.txtSubcribe);
+        txtTopic = (EditText) findViewById(R.id.txtTopic);
+        txtMessage = (EditText) findViewById(R.id.txtMessage);
+
+        tvLastMessage = (TextView) findViewById(R.id.tvLastMessage);
+        tvClientId = (TextView) findViewById(R.id.tvClientId);
+        tvStatus = (TextView) findViewById(R.id.tvStatus);
+
+        btnConnect = (Button) findViewById(R.id.btnConnect);
+        btnConnect.setOnClickListener(connectClick);
+        btnConnect.setEnabled(false);
+
+        signOutButton = (Button)findViewById(R.id.signOut);
+        signOutButton.setOnClickListener(signOut);
+
+
+
+        btnSubscribe = (Button) findViewById(R.id.btnSubscribe);
+        btnSubscribe.setOnClickListener(subscribeClick);
+
+        btnPublish = (Button) findViewById(R.id.btnPublish);
+        btnPublish.setOnClickListener(publishClick);
+
+        btnDisconnect = (Button) findViewById(R.id.btnDisconnect);
+        btnDisconnect.setOnClickListener(disconnectClick);
+
+        // MQTT client IDs are required to be unique per AWS IoT account.
+        // This UUID is "practically unique" but does not _guarantee_
+        // uniqueness.
+        clientId = UUID.randomUUID().toString();
+        tvClientId.setText(clientId);
+        System.out.println("CLIENT ID : " + clientId);
+
+        // Initialize the AWS Cognito credentials provider
+        credentialsProvider = new CognitoCachingCredentialsProvider(
+                getApplicationContext(), // context
+                COGNITO_POOL_ID, // Identity Pool ID
+                MY_REGION // Region
+        );
+        credentialsProvider.setLogins(logins);
+        cognitoIdentity = new AmazonCognitoIdentityClient(credentialsProvider);
+        getIdReq = new GetIdRequest();
+        getIdReq.setLogins(logins); // or if you have already set provider logins just use credentialsProvider.getLogins()
+        getIdReq.setIdentityPoolId(COGNITO_POOL_ID);
+        new Thread(new Runnable() {
+            @Override
+            public void run() {
+
+                getIdRes = cognitoIdentity.getId(getIdReq);
+                Log.e("TAG", "VALUE SET");
+                System.out.println(credentialsProvider.getIdentityId());
+                System.out.println(credentialsProvider.getCredentials());
+
+                attachPolicyReq = new AttachPrincipalPolicyRequest(); //in docs it called AttachPolicyRequest but it`s wrong
+                attachPolicyReq.setPolicyName(AWS_IOT_POLICY_NAME); //name of your IOTAWS policy
+                attachPolicyReq.setPrincipal(getIdRes.getIdentityId());
+                mIotAndroidClient = new AWSIotClient(credentialsProvider);
+                mIotAndroidClient.setRegion(Region.getRegion(MY_REGION));
+                mIotAndroidClient.attachPrincipalPolicy(attachPolicyReq);
+            }
+        }).start();
+        Region region = Region.getRegion(MY_REGION);
+
+        // MQTT Client
+        mqttManager = new AWSIotMqttManager(clientId, CUSTOMER_SPECIFIC_ENDPOINT);
+        mqttManager.setAutoReconnect(false);
+
+        // Set keepalive to 10 seconds.  Will recognize disconnects more quickly but will also send
+        // MQTT pings every 10 seconds.
+        mqttManager.setKeepAlive(10);
+
+        // Set Last Will and Testament for MQTT.  On an unclean disconnect (loss of connection)
+        // AWS IoT will publish this message to alert other clients.
+        AWSIotMqttLastWillAndTestament lwt = new AWSIotMqttLastWillAndTestament("my/lwt/topic",
+                "Android client lost connection", AWSIotMqttQos.QOS0);
+        mqttManager.setMqttLastWillAndTestament(lwt);
+        btnConnect.setEnabled(true);
+
+    }
+
+    View.OnClickListener signOut = new View.OnClickListener() {
+        @Override
+        public void onClick(View v) {
+            AWSMobileClient.getInstance().signOut();
+            Intent pubSub = new Intent(PubSubActivity.this, Main2Activity.class);
+            startActivity(pubSub);
+        }
+    };
+
+    View.OnClickListener connectClick = new View.OnClickListener() {
+        @Override
+        public void onClick(View v) {
+
+            Log.d(LOG_TAG, "clientId = " + clientId);
+
+            try {
+                mqttManager.connect(credentialsProvider, new AWSIotMqttClientStatusCallback() {
+                    @Override
+                    public void onStatusChanged(final AWSIotMqttClientStatus status,
+                                                final Throwable throwable) {
+                        Log.d(LOG_TAG, "Status = " + String.valueOf(status));
+
+                        runOnUiThread(new Runnable() {
+                            @Override
+                            public void run() {
+                                if (status == AWSIotMqttClientStatus.Connecting) {
+                                    tvStatus.setText("Connecting...");
+
+                                } else if (status == AWSIotMqttClientStatus.Connected) {
+                                    tvStatus.setText("Connected");
+
+                                } else if (status == AWSIotMqttClientStatus.Reconnecting) {
+                                    if (throwable != null) {
+                                        Log.e(LOG_TAG, "Connection error.", throwable);
+                                    }
+                                    tvStatus.setText("Reconnecting");
+                                } else if (status == AWSIotMqttClientStatus.ConnectionLost) {
+                                    if (throwable != null) {
+                                        Log.e(LOG_TAG, "Connection error.", throwable);
+                                    }
+                                    tvStatus.setText("Disconnected");
+                                } else {
+                                    tvStatus.setText("Disconnected");
+
+                                }
+                            }
+                        });
+                    }
+                });
+            } catch (final Exception e) {
+                Log.e(LOG_TAG, "Connection error.", e);
+                tvStatus.setText("Error! " + e.getMessage());
+            }
+        }
+    };
+
+    View.OnClickListener subscribeClick = new View.OnClickListener() {
+        @Override
+        public void onClick(View v) {
+
+            final String topic = txtSubcribe.getText().toString();
+
+            Log.d(LOG_TAG, "topic = " + topic);
+
+            try {
+                mqttManager.subscribeToTopic(topic, AWSIotMqttQos.QOS0,
+                        new AWSIotMqttNewMessageCallback() {
+                            @Override
+                            public void onMessageArrived(final String topic, final byte[] data) {
+                                runOnUiThread(new Runnable() {
+                                    @Override
+                                    public void run() {
+                                        try {
+                                            String message = new String(data, "UTF-8");
+                                            Log.d(LOG_TAG, "Message arrived:");
+                                            Log.d(LOG_TAG, "   Topic: " + topic);
+                                            Log.d(LOG_TAG, " Message: " + message);
+
+                                            tvLastMessage.setText(message);
+
+                                        } catch (UnsupportedEncodingException e) {
+                                            Log.e(LOG_TAG, "Message encoding error.", e);
+                                        }
+                                    }
+                                });
+                            }
+                        });
+            } catch (Exception e) {
+                Log.e(LOG_TAG, "Subscription error.", e);
+            }
+        }
+    };
+
+    View.OnClickListener publishClick = new View.OnClickListener() {
+        @Override
+        public void onClick(View v) {
+
+            final String topic = txtTopic.getText().toString();
+            final String msg = txtMessage.getText().toString();
+
+            try {
+                mqttManager.publishString(msg, topic, AWSIotMqttQos.QOS0);
+            } catch (Exception e) {
+                Log.e(LOG_TAG, "Publish error.", e);
+            }
+
+        }
+    };
+
+    View.OnClickListener disconnectClick = new View.OnClickListener() {
+        @Override
+        public void onClick(View v) {
+
+            try {
+                mqttManager.disconnect();
+            } catch (Exception e) {
+                Log.e(LOG_TAG, "Disconnect error.", e);
+            }
+
+        }
+    };
+}
+```
