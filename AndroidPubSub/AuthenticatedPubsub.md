@@ -96,7 +96,7 @@ The sample demonstrates how to use IOT with certificate based authentication. Th
                     });
     ```
 
-Finally, your MainActivity.java and PubSubActivity.java should look like the following:
+Finally, your MainActivity.java and PubSubActivity.java should look similar to the following:
 
 ```
 package com.amazonaws.demo.androidpubsub;
